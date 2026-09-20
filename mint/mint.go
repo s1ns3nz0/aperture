@@ -18,6 +18,14 @@ var (
 	// ErrSecretNotFound is an error returned when we attempt to retrieve a
 	// secret by its key but it is not found.
 	ErrSecretNotFound = errors.New("secret not found")
+
+	// ErrInvalidPreimage is returned when the preimage presented with an
+	// L402 does not hash to the payment hash bound to it.
+	ErrInvalidPreimage = errors.New("invalid preimage")
+
+	// ErrInvalidSignature is returned when an L402's macaroon signature
+	// does not verify against its stored secret.
+	ErrInvalidSignature = errors.New("invalid signature")
 )
 
 // Challenger is an interface used to present requesters of L402s with a
@@ -132,6 +140,7 @@ func (m *Mint) MintL402(ctx context.Context,
 	// payment request to present the requester of the L402 with.
 	paymentRequest, paymentHash, err := m.cfg.Challenger.NewChallenge(price)
 	if err != nil {
+		recordMint(MintChallengeFailed)
 		return nil, "", err
 	}
 
@@ -141,11 +150,13 @@ func (m *Mint) MintL402(ctx context.Context,
 	// mapped to a unique secret.
 	id, err := createUniqueIdentifier(paymentHash)
 	if err != nil {
+		recordMint(MintIdentifierFailed)
 		return nil, "", err
 	}
 	idHash := sha256.Sum256(id)
 	secret, err := m.cfg.Secrets.NewSecret(ctx, idHash)
 	if err != nil {
+		recordMint(MintSecretFailed)
 		return nil, "", err
 	}
 	mac, err := macaroon.New(
@@ -154,6 +165,7 @@ func (m *Mint) MintL402(ctx context.Context,
 	if err != nil {
 		// Attempt to revoke the secret to save space.
 		_ = m.cfg.Secrets.RevokeSecret(ctx, idHash)
+		recordMint(MintMacaroonFailed)
 		return nil, "", err
 	}
 
@@ -166,12 +178,14 @@ func (m *Mint) MintL402(ctx context.Context,
 		if err != nil {
 			// Attempt to revoke the secret to save space.
 			_ = m.cfg.Secrets.RevokeSecret(ctx, idHash)
+			recordMint(MintCaveatFailed)
 			return nil, "", err
 		}
 	}
 	if err := l402.AddFirstPartyCaveats(mac, caveats...); err != nil {
 		// Attempt to revoke the secret to save space.
 		_ = m.cfg.Secrets.RevokeSecret(ctx, idHash)
+		recordMint(MintCaveatFailed)
 		return nil, "", err
 	}
 
@@ -207,6 +221,7 @@ func (m *Mint) MintL402(ctx context.Context,
 		}
 	}
 
+	recordMint(MintOK)
 	return mac, paymentRequest, nil
 }
 
@@ -307,23 +322,34 @@ func (m *Mint) VerifyL402(ctx context.Context,
 	// was provided.
 	id, err := l402.DecodeIdentifier(bytes.NewReader(params.Macaroon.Id()))
 	if err != nil {
+		recordVerify(VerifyMalformedMacaroon)
 		return err
 	}
 	if params.Preimage.Hash() != id.PaymentHash {
-		return fmt.Errorf("invalid preimage %v for %v", params.Preimage,
-			id.PaymentHash)
+		recordVerify(VerifyBadPreimage)
+		return fmt.Errorf("%w: %v for %v", ErrInvalidPreimage,
+			params.Preimage, id.PaymentHash)
 	}
 
-	// If there was, then we'll ensure the L402 was minted by us.
+	// If there was, then we'll ensure the L402 was minted by us. Only an
+	// actual "not found" is evidence of a bad credential; anything else
+	// (a store timeout, a cancelled context, ...) is our own infra
+	// failing, not the caller's fault, so it gets a distinct reason.
 	secret, err := m.cfg.Secrets.GetSecret(
 		ctx, sha256.Sum256(params.Macaroon.Id()),
 	)
 	if err != nil {
+		if errors.Is(err, ErrSecretNotFound) {
+			recordVerify(VerifySecretNotFound)
+		} else {
+			recordVerify(VerifySecretLookupError)
+		}
 		return err
 	}
 	rawCaveats, err := params.Macaroon.VerifySignature(secret[:], nil)
 	if err != nil {
-		return err
+		recordVerify(VerifyBadSignature)
+		return fmt.Errorf("%w: %v", ErrInvalidSignature, err)
 	}
 
 	// With the L402 verified, we'll now inspect its caveats to ensure the
@@ -338,9 +364,20 @@ func (m *Mint) VerifyL402(ctx context.Context,
 		}
 		caveats = append(caveats, caveat)
 	}
-	return l402.VerifyCaveats(
+	err = l402.VerifyCaveats(
 		caveats,
 		l402.NewServicesSatisfier(params.TargetService),
 		l402.NewTimeoutSatisfier(params.TargetService, m.cfg.Now),
 	)
+	if err != nil {
+		recordVerify(VerifyCaveatUnsatisfied)
+		return err
+	}
+
+	// The macaroon's crypto and caveats check out. This is NOT the same
+	// as the request being accepted: the caller (auth.Accept) still has
+	// to confirm the underlying invoice is actually settled before it
+	// records VerifyAccepted. See VerifyReason's doc comment.
+	recordVerify(VerifyMacaroonValid)
+	return nil
 }
