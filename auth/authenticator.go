@@ -44,6 +44,7 @@ func (l *L402Authenticator) Accept(header *http.Header, serviceName string) bool
 	mac, preimage, err := l402.FromHeader(header)
 	if err != nil {
 		log.Debugf("Deny: %v", err)
+		mint.RecordVerifyResult(mint.VerifyMalformedHeader)
 		return false
 	}
 
@@ -54,6 +55,11 @@ func (l *L402Authenticator) Accept(header *http.Header, serviceName string) bool
 	}
 	err = l.minter.VerifyL402(context.Background(), verificationParams)
 	if err != nil {
+		// A Minter implementation is expected to record the specific
+		// reason itself (see mint.VerifyReason) before returning this
+		// error; mint.Mint does. Accept() doesn't have enough
+		// information to reconstruct that reason from err alone, so
+		// it deliberately does not record a fallback label here.
 		log.Debugf("Deny: L402 validation failed: %v", err)
 		return false
 	}
@@ -65,9 +71,11 @@ func (l *L402Authenticator) Accept(header *http.Header, serviceName string) bool
 	)
 	if err != nil {
 		log.Debugf("Deny: Invoice status mismatch: %v", err)
+		mint.RecordVerifyResult(mint.VerifyInvoiceUnsettled)
 		return false
 	}
 
+	mint.RecordVerifyResult(mint.VerifyAccepted)
 	return true
 }
 
