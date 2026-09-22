@@ -23,3 +23,13 @@ dashboard/out/
 
 # rapid property-test failure repro files, written on a failing run
 testdata/rapid/
+
+# Repository-local Codex harness runtime state
+/.harness/runs/*
+!/.harness/runs/.gitkeep
+/.harness/cache/
+/.harness/graph-assets/
+/.re0/
+/graft/
+/node_modules/
+/npm-debug.log*
