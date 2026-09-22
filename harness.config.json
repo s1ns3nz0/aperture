@@ -1,0 +1,83 @@
+{
+  "$schema": "./harness.config.schema.json",
+  "schemaVersion": 1,
+  "project": {
+    "name": "aperture",
+    "description": "Lightning Labs Aperture L402 reverse proxy"
+  },
+  "paperthin": {
+    "source": "github:LilMGenius/paperthin",
+    "ref": "3bca079a51bcfff5dafb53d1d7f9f523d66ee317"
+  },
+  "policies": {
+    "mvpFirst": true,
+    "grillMe": {
+      "appliesTo": [
+        "product-design",
+        "security",
+        "external-integration",
+        "data-or-irreversible-change",
+        "external-state-change"
+      ]
+    },
+    "review": {
+      "skills": [
+        "sip",
+        "shower"
+      ],
+      "appliesTo": [
+        "code",
+        "configuration",
+        "user-visible-behavior"
+      ]
+    },
+    "testPortability": {
+      "requiredPlatform": "linux",
+      "vendorNeutral": true,
+      "allowLocalOnlyRequired": false
+    },
+    "containerValidation": {
+      "requiredFor": [
+        "new-application",
+        "deployable-artifact"
+      ],
+      "platform": "linux",
+      "imageSelection": "official-or-maintained-and-digest-pinned-when-available",
+      "blocksCompletionWhenUnavailable": true,
+      "allowsImagePush": false,
+      "allowsDeployment": false
+    },
+    "externalActions": "explicit-task-authorization"
+  },
+  "adapters": {
+    "active": [
+      "node"
+    ],
+    "definitions": {
+      "node": {
+        "testPolicy": {
+          "platforms": [
+            "linux"
+          ],
+          "localOnly": false,
+          "vendorNeutral": true
+        },
+        "commands": {
+          "test": "npm test"
+        }
+      },
+      "go": {
+        "testPolicy": {
+          "platforms": [
+            "linux"
+          ],
+          "localOnly": false,
+          "vendorNeutral": true
+        },
+        "commands": {
+          "test": "make unit"
+        }
+      }
+    }
+  }
+}

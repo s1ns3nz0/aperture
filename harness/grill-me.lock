@@ -1,0 +1,8 @@
+{
+  "dependency": "grill-me",
+  "repository": "https://github.com/mattpocock/skills.git",
+  "revision": "eebfb3c99aa955d4928192fab5de247d36633502",
+  "purpose": "User-facing interview skill for requests that can affect product direction or a material boundary.",
+  "installer": "Read the pinned release instructions before installation; do not infer an installer command from this lock.",
+  "verify": "Verify the installed grill-me artifact resolves to revision eebfb3c99aa955d4928192fab5de247d36633502. A successful installation alone is not pin verification."
+}

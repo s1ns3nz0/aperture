@@ -1,0 +1,13 @@
+{
+  "name": "aperture-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Repository-local Codex harness for Aperture",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "harness:init": "node scripts/harness-init.mjs",
+    "harness:check": "node scripts/harness-check.mjs",
+    "harness:verify": "node scripts/harness-check.mjs --run-adapters",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

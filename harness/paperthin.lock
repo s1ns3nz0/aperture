@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "dependency": "paperthin",
+  "repository": "https://github.com/LilMGenius/paperthin",
+  "release": "v0.17.4",
+  "revision": "3bca079a51bcfff5dafb53d1d7f9f523d66ee317",
+  "installer": "npx skills@latest add LilMGenius/paperthin --global --agent '*'",
+  "verify": "Verify the installed Paperthin artifact resolves to revision 3bca079a51bcfff5dafb53d1d7f9f523d66ee317, then verify the installed skills needed by the project. The upstream installer may use symlinks and auto-update; do not treat a successful install alone as a pin verification.",
+  "update_policy": "Explicit, reviewable, compatibility-checked updates only."
+}
