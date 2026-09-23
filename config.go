@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/lightninglabs/aperture/aperturedb"
 	"github.com/lightninglabs/aperture/proxy"
+	"github.com/lightninglabs/aperture/securitylog"
 	"github.com/lightningnetwork/lnd/build"
 )
 
@@ -279,6 +280,8 @@ type Config struct {
 	// server to scrape metrics from.
 	Prometheus *PrometheusConfig `group:"prometheus" namespace:"prometheus" description:"Configuration setting up an endpoint that a Prometheus server can scrape."`
 
+	SecurityLog *securitylog.Config `group:"securitylog" namespace:"securitylog" description:"Opt-in structured L402 security events"`
+
 	// Admin is the configuration for the admin REST API.
 	Admin *AdminConfig `group:"admin" namespace:"admin" description:"Configuration for the admin REST API."`
 
@@ -335,6 +338,9 @@ type Config struct {
 }
 
 func (c *Config) validate() error {
+	if _, err := c.SecurityLog.LoadKey(); err != nil {
+		return err
+	}
 	if !c.Authenticator.Disable {
 		if err := c.Authenticator.validate(); err != nil {
 			return err
@@ -383,6 +389,7 @@ func NewConfig() *Config {
 		Tor:              &TorConfig{},
 		HashMail:         &HashMailConfig{},
 		Prometheus:       &PrometheusConfig{},
+		SecurityLog:      &securitylog.Config{},
 		Admin:            &AdminConfig{},
 		IdleTimeout:      defaultIdleTimeout,
 		ReadTimeout:      defaultReadTimeout,

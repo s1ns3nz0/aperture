@@ -377,3 +377,11 @@ logging:
     # Log level for file output.
     # Valid options include: trace, debug, info, warn, error, critical, off.
     level: "info"
+# Structured security events are independent of debuglevel; OFF by default.
+# Requires Linux container stdout as a pipe (no TTY or file redirection).
+# Provide a dedicated mounted secret with 64 hex characters (32 random bytes).
+# See docs/security-events.md for schema, loss accounting, and key rotation.
+securitylog:
+  enabled: false
+  keyfile: ""
+  keyid: ""

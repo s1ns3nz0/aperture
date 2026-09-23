@@ -19,12 +19,23 @@ import (
 	"github.com/lightninglabs/aperture/auth"
 	"github.com/lightninglabs/aperture/l402"
 	"github.com/lightninglabs/aperture/mpp"
+	"github.com/lightninglabs/aperture/securitylog"
 	"google.golang.org/grpc/codes"
 )
 
 // receiptContextKey is the context key used to pass Payment-Receipt headers
 // from the authentication check to the response modifier.
 type receiptContextKey struct{}
+
+type securityTraceKey struct{}
+
+func securityTrace(r *http.Request) *securitylog.Trace {
+	t, _ := r.Context().Value(securityTraceKey{}).(*securitylog.Trace)
+	return t
+}
+
+// SetSecurityLog installs an optional event emitter before serving requests.
+func (p *Proxy) SetSecurityLog(e *securitylog.Emitter) { p.securityLog = e }
 
 const (
 	// formatPattern is the pattern in which the request log will be
@@ -107,6 +118,7 @@ type Proxy struct {
 	// With it, the timeout means what an operator almost certainly
 	// intended: a stream dies when it stalls, not when it lasts.
 	writeDeadlineWindow time.Duration
+	securityLog         *securitylog.Emitter
 }
 
 // SetWriteDeadlineWindow installs the rolling write deadline window applied
@@ -350,6 +362,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resourceName := target.ResourceName(r.URL.Path)
+	if p.securityLog != nil {
+		trace := p.securityLog.Begin(target.Name, r.Method, r.RemoteAddr)
+		r = r.WithContext(context.WithValue(r.Context(), securityTraceKey{}, trace))
+	}
 
 	// Determine auth level required to access service and dispatch request
 	// accordingly.
@@ -384,7 +400,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// resources. If the service specifies an auth scheme, only
 		// authenticators matching that scheme are tried.
 		acceptAuth := p.acceptForService(
-			&r.Header, resourceName, target,
+			r, resourceName, target,
 		)
 		if !acceptAuth {
 			if skipInvoiceCreation {
@@ -454,7 +470,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// We only need to respect the freebie counter if the user
 		// is not authenticated at all.
 		acceptAuth := p.acceptForService(
-			&r.Header, resourceName, target,
+			r, resourceName, target,
 		)
 		if !acceptAuth {
 			ok, err := target.freebieDB.CanPass(r, remoteIP)
@@ -534,8 +550,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // acceptForService checks authentication, respecting the service's per-service
 // AuthScheme setting. If the authenticator is a MultiAuthenticator and the
 // service has an AuthScheme set, only matching sub-authenticators are tried.
-func (p *Proxy) acceptForService(header *http.Header, resourceName string,
+func (p *Proxy) acceptForService(r *http.Request, resourceName string,
 	target *Service) bool {
+	header := &r.Header
+	if trace := securityTrace(r); trace != nil {
+		accepted, observation := auth.AcceptObserved(p.authenticator, header, resourceName, target.AuthScheme)
+		if observation != nil {
+			if observation.Settlement != nil {
+				trace.Record(*observation.Settlement)
+			}
+			trace.Record(observation.Authorization)
+		}
+		return accepted
+	}
 
 	multi, ok := p.authenticator.(*auth.MultiAuthenticator)
 	if ok && target.AuthScheme != "" {
@@ -887,7 +914,26 @@ func (p *Proxy) handlePaymentRequired(w http.ResponseWriter, r *http.Request,
 	// price of a bundle.
 	prices := quoteSessionPrices(r, target, servicePrice)
 
-	header, err := p.freshChallengeHeader(serviceName, prices)
+	var (
+		header  http.Header
+		err     error
+		details []securitylog.Detail
+	)
+	trace := securityTrace(r)
+	if trace != nil {
+		header, details, err = auth.FreshChallengeObserved(p.authenticator, serviceName, prices)
+	} else {
+		header, err = p.freshChallengeHeader(serviceName, prices)
+	}
+	issued := false
+	defer func() {
+		for _, d := range details {
+			if !issued && d.Outcome == "issued" {
+				d.Outcome, d.Reason, d.Internal = "error", "challenge_delivery_failed", true
+			}
+			trace.Record(d)
+		}
+	}()
 	if err != nil {
 		log.Errorf("Error creating new challenge header: %v", err)
 		sendDirectResponse(
@@ -947,6 +993,7 @@ func (p *Proxy) handlePaymentRequired(w http.ResponseWriter, r *http.Request,
 			"payment required",
 		)
 	}
+	issued = true
 }
 
 // sendDirectResponse sends a response directly to the client without proxying

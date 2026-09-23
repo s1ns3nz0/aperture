@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/lightninglabs/aperture/securitylog"
 )
 
 const (
@@ -123,6 +125,11 @@ func (m *MultiAuthenticator) FreshChallengeHeader(serviceName string,
 // NOTE: This is part of the PricedChallenger interface.
 func (m *MultiAuthenticator) FreshChallengeHeaderWithPrices(serviceName string,
 	prices ChallengePrices) (http.Header, error) {
+	return m.freshChallengeHeaderWithPrices(serviceName, prices, nil)
+}
+
+func (m *MultiAuthenticator) freshChallengeHeaderWithPrices(serviceName string,
+	prices ChallengePrices, observations *[]securitylog.Detail) (http.Header, error) {
 
 	merged := make(http.Header)
 	var numErrors int
@@ -133,7 +140,11 @@ func (m *MultiAuthenticator) FreshChallengeHeaderWithPrices(serviceName string,
 			err    error
 		)
 
-		if priced, ok := auth.(PricedChallenger); ok {
+		if observations != nil {
+			var details []securitylog.Detail
+			header, details, err = FreshChallengeObserved(auth, serviceName, prices)
+			*observations = append(*observations, details...)
+		} else if priced, ok := auth.(PricedChallenger); ok {
 			header, err = priced.FreshChallengeHeaderWithPrices(
 				serviceName, prices,
 			)

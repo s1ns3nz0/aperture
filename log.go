@@ -9,6 +9,7 @@ import (
 	"github.com/lightninglabs/aperture/mint"
 	"github.com/lightninglabs/aperture/mpp"
 	"github.com/lightninglabs/aperture/proxy"
+	"github.com/lightninglabs/aperture/securitylog"
 	"github.com/lightninglabs/lndclient"
 	"github.com/lightningnetwork/lnd"
 	"github.com/lightningnetwork/lnd/build"
@@ -16,6 +17,23 @@ import (
 )
 
 const Subsystem = "APER"
+
+// boundedLogHandlers preserves the application's logging options but shares
+// the bounded stdout transport when security logging is enabled. Otherwise a
+// blocked console logger could stall authentication despite the event queue.
+func boundedLogHandlers(cfg *build.LogConfig, events *securitylog.Emitter) []btclog.Handler {
+	var handlers []btclog.Handler
+	switch build.LoggingType {
+	case build.LogTypeStdOut, build.LogTypeDefault:
+		if !cfg.Console.Disable {
+			handlers = append(handlers, btclog.NewDefaultHandler(events.ConsoleWriter(), cfg.Console.HandlerOptions()...))
+		}
+	}
+	if build.LoggingType == build.LogTypeDefault && !cfg.File.Disable {
+		handlers = append(handlers, btclog.NewDefaultHandler(logWriter, cfg.File.HandlerOptions()...))
+	}
+	return handlers
+}
 
 var (
 	logWriter = build.NewRotatingLogWriter()

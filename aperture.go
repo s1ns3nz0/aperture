@@ -34,6 +34,7 @@ import (
 	"github.com/lightninglabs/aperture/lnc"
 	"github.com/lightninglabs/aperture/mint"
 	"github.com/lightninglabs/aperture/proxy"
+	"github.com/lightninglabs/aperture/securitylog"
 	"github.com/lightninglabs/lightning-node-connect/hashmailrpc"
 	"github.com/lightninglabs/lndclient"
 	"github.com/lightningnetwork/lnd"
@@ -44,6 +45,7 @@ import (
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/signal"
 	"github.com/lightningnetwork/lnd/tor"
+	"github.com/prometheus/client_golang/prometheus"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/http2"
@@ -166,13 +168,18 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("unable to parse config file: %w", err)
 	}
-	err = setupLogging(cfg, interceptor)
+	a := NewAperture(cfg)
+	a.securityLog, err = securitylog.Open(cfg.SecurityLog)
+	if err != nil {
+		return err
+	}
+	defer a.securityLog.Close()
+	err = setupLogging(cfg, interceptor, a.securityLog)
 	if err != nil {
 		return fmt.Errorf("unable to set up logging: %v", err)
 	}
 
 	errChan := make(chan error)
-	a := NewAperture(cfg)
 	if err := a.Start(errChan, interceptor.ShutdownChannel()); err != nil {
 		return fmt.Errorf("unable to start aperture: %v", err)
 	}
@@ -201,6 +208,7 @@ type Aperture struct {
 	proxy         *proxy.Proxy
 	proxyCleanup  func()
 	adminCleanup  func()
+	securityLog   *securitylog.Emitter
 
 	wg   sync.WaitGroup
 	quit chan struct{}
@@ -217,9 +225,28 @@ func NewAperture(cfg *Config) *Aperture {
 // Start sets up the proxy server and starts it.
 //
 //nolint:gocyclo
-func (a *Aperture) Start(errChan chan error, shutdown <-chan struct{}) error {
+func (a *Aperture) Start(errChan chan error, shutdown <-chan struct{}) (startErr error) {
+	var err error
+	if a.securityLog == nil {
+		a.securityLog, err = securitylog.Open(a.cfg.SecurityLog)
+	}
+	if err != nil {
+		return err
+	}
+	if a.securityLog != nil {
+		if err := prometheus.Register(a.securityLog); err != nil {
+			a.securityLog.Close()
+			return fmt.Errorf("securitylog: cannot register exporter health metrics")
+		}
+		defer func() {
+			if startErr != nil {
+				a.securityLog.Close()
+				prometheus.Unregister(a.securityLog)
+			}
+		}()
+	}
 	// Start the prometheus exporter.
-	err := StartPrometheusExporter(a.cfg.Prometheus, shutdown)
+	err = StartPrometheusExporter(a.cfg.Prometheus, shutdown)
 	if err != nil {
 		return fmt.Errorf("unable to start the prometheus "+
 			"exporter: %v", err)
@@ -512,6 +539,7 @@ func (a *Aperture) Start(errChan chan error, shutdown <-chan struct{}) error {
 	// reasoning model thinking silently being the canonical case, is cut
 	// off as a stall even though the client is healthy.
 	a.proxy.SetWriteDeadlineWindow(a.cfg.WriteTimeout)
+	a.proxy.SetSecurityLog(a.securityLog)
 
 	handler := http.HandlerFunc(a.proxy.ServeHTTP)
 	a.httpsServer = &http.Server{
@@ -632,6 +660,12 @@ func (a *Aperture) UpdateServices(services []*proxy.Service) error {
 
 // Stop gracefully shuts down the Aperture service.
 func (a *Aperture) Stop() error {
+	defer func() {
+		if a.securityLog != nil {
+			a.securityLog.Close()
+			prometheus.Unregister(a.securityLog)
+		}
+	}()
 	var returnErr error
 
 	if a.challenger != nil {
@@ -779,15 +813,17 @@ func getConfig() (*Config, error) {
 }
 
 // setupLogging parses the debug level and initializes the log file rotator.
-func setupLogging(cfg *Config, interceptor signal.Interceptor) error {
+func setupLogging(cfg *Config, interceptor signal.Interceptor, securityEvents ...*securitylog.Emitter) error {
 	if cfg.DebugLevel == "" {
 		cfg.DebugLevel = defaultLogLevel
 	}
 
 	// Now initialize the logger and set the log level.
-	sugLogMgr := build.NewSubLoggerManager(
-		build.NewDefaultLogHandlers(cfg.Logging, logWriter)...,
-	)
+	handlers := build.NewDefaultLogHandlers(cfg.Logging, logWriter)
+	if len(securityEvents) > 0 && securityEvents[0] != nil {
+		handlers = boundedLogHandlers(cfg.Logging, securityEvents[0])
+	}
+	sugLogMgr := build.NewSubLoggerManager(handlers...)
 	SetupLoggers(sugLogMgr, interceptor)
 
 	// Use our default data dir unless a base dir is set.

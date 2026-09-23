@@ -302,15 +302,30 @@ type VerificationParams struct {
 // VerifyL402 attempts to verify an L402 with the given parameters.
 func (m *Mint) VerifyL402(ctx context.Context,
 	params *VerificationParams) error {
+	_, err := m.VerifyL402Observed(ctx, params)
+	return err
+}
+
+// VerificationResult describes a verification without exposing error text.
+// Verified means the signature was checked; restrictions may still deny use.
+type VerificationResult struct {
+	Reason             string
+	Internal, Verified bool
+}
+
+// VerifyL402Observed preserves VerifyL402's errors and decision order while
+// returning a stable classification for request-level security events.
+func (m *Mint) VerifyL402Observed(ctx context.Context,
+	params *VerificationParams) (VerificationResult, error) {
 
 	// We'll first perform a quick check to determine if a valid preimage
 	// was provided.
 	id, err := l402.DecodeIdentifier(bytes.NewReader(params.Macaroon.Id()))
 	if err != nil {
-		return err
+		return VerificationResult{Reason: "malformed_identifier"}, err
 	}
 	if params.Preimage.Hash() != id.PaymentHash {
-		return fmt.Errorf("invalid preimage %v for %v", params.Preimage,
+		return VerificationResult{Reason: "payment_proof_mismatch"}, fmt.Errorf("invalid preimage %v for %v", params.Preimage,
 			id.PaymentHash)
 	}
 
@@ -319,11 +334,14 @@ func (m *Mint) VerifyL402(ctx context.Context,
 		ctx, sha256.Sum256(params.Macaroon.Id()),
 	)
 	if err != nil {
-		return err
+		if errors.Is(err, ErrSecretNotFound) {
+			return VerificationResult{Reason: "unknown_credential"}, err
+		}
+		return VerificationResult{Reason: "secret_store_error", Internal: true}, err
 	}
 	rawCaveats, err := params.Macaroon.VerifySignature(secret[:], nil)
 	if err != nil {
-		return err
+		return VerificationResult{Reason: "invalid_signature"}, err
 	}
 
 	// With the L402 verified, we'll now inspect its caveats to ensure the
@@ -338,9 +356,13 @@ func (m *Mint) VerifyL402(ctx context.Context,
 		}
 		caveats = append(caveats, caveat)
 	}
-	return l402.VerifyCaveats(
+	err = l402.VerifyCaveats(
 		caveats,
 		l402.NewServicesSatisfier(params.TargetService),
 		l402.NewTimeoutSatisfier(params.TargetService, m.cfg.Now),
 	)
+	if err != nil {
+		return VerificationResult{Reason: "restriction_failure", Verified: true}, err
+	}
+	return VerificationResult{Reason: "accepted", Verified: true}, nil
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/lightninglabs/aperture/l402"
 	"github.com/lightninglabs/aperture/mint"
+	"github.com/lightninglabs/aperture/securitylog"
 	"github.com/lightningnetwork/lnd/lnrpc"
 )
 
@@ -38,13 +39,26 @@ func NewL402Authenticator(minter Minter,
 //
 // NOTE: This is part of the Authenticator interface.
 func (l *L402Authenticator) Accept(header *http.Header, serviceName string) bool {
+	return l.accept(header, serviceName, nil)
+}
+
+func (l *L402Authenticator) accept(header *http.Header, serviceName string, o *Observation) bool {
+	if o != nil {
+		o.Authorization = securitylog.Detail{Kind: "l402.authorization", Outcome: "denied", Reason: "malformed_credentials"}
+	}
 	// Try reading the macaroon and preimage from the HTTP header. This can
 	// be in different header fields depending on the implementation and/or
 	// protocol.
 	mac, preimage, err := l402.FromHeader(header)
 	if err != nil {
 		log.Debugf("Deny: %v", err)
+		if o != nil && header.Get(l402.HeaderAuthorization) == "" && header.Get(l402.HeaderMacaroonMD) == "" && header.Get(l402.HeaderMacaroon) == "" {
+			o.Authorization.Reason = "missing_credentials"
+		}
 		return false
+	}
+	if o != nil && len(mac.Id()) == 66 {
+		o.Authorization.Identifier = mac.Id()
 	}
 
 	verificationParams := &mint.VerificationParams{
@@ -52,7 +66,17 @@ func (l *L402Authenticator) Accept(header *http.Header, serviceName string) bool
 		Preimage:      preimage,
 		TargetService: serviceName,
 	}
-	err = l.minter.VerifyL402(context.Background(), verificationParams)
+	if detailed, ok := l.minter.(observedMinter); ok && o != nil {
+		var result mint.VerificationResult
+		result, err = detailed.VerifyL402Observed(context.Background(), verificationParams)
+		o.Authorization.Reason, o.Authorization.Internal, o.Authorization.Verified = result.Reason, result.Internal, result.Verified
+	} else {
+		err = l.minter.VerifyL402(context.Background(), verificationParams)
+		if o != nil {
+			o.Authorization.Reason, o.Authorization.Internal = "processing_error", err != nil
+			o.Authorization.Verified = err == nil
+		}
+	}
 	if err != nil {
 		log.Debugf("Deny: L402 validation failed: %v", err)
 		return false
@@ -63,11 +87,22 @@ func (l *L402Authenticator) Accept(header *http.Header, serviceName string) bool
 		preimage.Hash(), lnrpc.Invoice_SETTLED,
 		DefaultInvoiceLookupTimeout,
 	)
+	if o != nil {
+		d := settlementDetail(l.checker, err)
+		d.Identifier, d.Verified = o.Authorization.Identifier, o.Authorization.Verified
+		o.Settlement = &d
+		if err != nil {
+			o.Authorization.Reason, o.Authorization.Internal = d.Reason, d.Internal
+		}
+	}
 	if err != nil {
 		log.Debugf("Deny: Invoice status mismatch: %v", err)
 		return false
 	}
 
+	if o != nil {
+		o.Authorization.Outcome, o.Authorization.Reason = "accepted", "accepted"
+	}
 	return true
 }
 
@@ -93,6 +128,14 @@ const (
 // NOTE: This is part of the Authenticator interface.
 func (l *L402Authenticator) FreshChallengeHeader(serviceName string,
 	servicePrice int64) (http.Header, error) {
+	return l.freshChallengeHeader(serviceName, servicePrice, nil)
+}
+
+func (l *L402Authenticator) freshChallengeHeader(serviceName string,
+	servicePrice int64, detail *securitylog.Detail) (http.Header, error) {
+	if detail != nil {
+		*detail = securitylog.Detail{Kind: "l402.challenge", Outcome: "error", Reason: "challenge_creation_failed", Internal: true}
+	}
 
 	service := l402.Service{
 		Name:  serviceName,
@@ -127,6 +170,12 @@ func (l *L402Authenticator) FreshChallengeHeader(serviceName string,
 	log.Debugf("Created new challenge header: [%s]", lsatValue)
 	header.Add("WWW-Authenticate", l402Value)
 	log.Debugf("Created new challenge header: [%s]", l402Value)
+	if detail != nil && err == nil {
+		detail.Outcome, detail.Reason, detail.Internal, detail.Verified = "issued", "challenge_issued", false, true
+		if len(mac.Id()) == 66 {
+			detail.Identifier = mac.Id()
+		}
+	}
 
 	return header, nil
 }

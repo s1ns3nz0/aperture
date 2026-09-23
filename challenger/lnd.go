@@ -528,12 +528,15 @@ func (l *LndChallenger) VerifyInvoiceStatus(hash lntypes.Hash,
 	// just "failed".
 	switch {
 	case !hasInvoice:
-		return fmt.Errorf("no active or settled invoice found for "+
-			"hash=%v", hash)
+		return l.invoiceCheckError("invoice_not_found", fmt.Errorf(
+			"no active or settled invoice found for hash=%v", hash,
+		))
 
 	case invoiceState != state:
-		return fmt.Errorf("invoice status not correct before timeout, "+
-			"hash=%v, status=%v", hash, invoiceState)
+		return l.invoiceCheckError("invoice_state_mismatch", fmt.Errorf(
+			"invoice status not correct before timeout, "+
+				"hash=%v, status=%v", hash, invoiceState,
+		))
 
 	default:
 		return nil
