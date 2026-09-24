@@ -118,7 +118,7 @@ func newEventFixture(t *testing.T, enabled bool, fail error) *eventFixture {
 	f.p, err = New(auth.NewL402Authenticator(f.minter, f.checker), []*Service{{Name: "configured-service", Address: strings.TrimPrefix(f.backend.URL, "http://"), Protocol: "http", HostRegexp: ".*", PathRegexp: ".*", Auth: "on", Price: 1}}, nil, nil)
 	require.NoError(t, err)
 	if enabled {
-		f.emitter, err = securitylog.New(bytes.Repeat([]byte{0xad}, 32), "rotation-v1", f.sink)
+		f.emitter, err = securitylog.New(f.sink)
 		require.NoError(t, err)
 		f.p.SetSecurityLog(f.emitter)
 		t.Cleanup(f.emitter.Close)

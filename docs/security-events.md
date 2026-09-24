@@ -6,22 +6,20 @@ Aperture can emit versioned, single-line JSON events for an external stdout coll
 
 Use Linux with stdout connected to a pipe, as in a container without a TTY. Regular-file redirection, TTYs, sockets and other operating systems are rejected when the feature is enabled. `/proc/self/fd` must be accessible. The daemon opens an independent nonblocking file description; it does not change stdout's existing file flags.
 
-Mount an operator-provided secret file containing exactly 64 hex characters (32 random bytes), optionally followed by a newline. Use a dedicated key, never an L402 signing secret or an MPP HMAC key. Aperture does not generate, deploy or rotate secrets.
+No key file or shared secret is required. Enable the stream with:
 
 ```yaml
 securitylog:
   enabled: true
-  keyfile: /run/secrets/aperture-security-hmac
-  keyid: security-2026-09
 ```
 
-Equivalent flags are `--securitylog.enabled`, `--securitylog.keyfile` and `--securitylog.keyid`. `keyid` is optional, non-secret and limited to 64 ASCII letters, digits, dots, underscores or hyphens. Missing/unreadable/invalid keys fail startup with a fixed error that does not include key contents. Disabled mode does not read a key file or create an event writer. Keys are loaded at startup; restart after rotation. Replicas need the same key to correlate references. Key rotation changes both reference domains; changing only `keyid` does not.
+The equivalent flag is `--securitylog.enabled`. Disabled mode creates no event writer. The earlier development-only `keyfile` and `keyid` settings are no longer supported; remove them from configuration. Existing `hmac:` references cannot be joined directly to the new `sha256:` references. The event schema remains version 1; collectors must treat references as opaque, algorithm-prefixed strings and must not require `key_id`, which is no longer emitted.
 
 Enable the existing `prometheus.enabled` exporter and configure its existing `listenaddr` to expose output-health metrics independently of stdout. Apply the normal network access controls to that endpoint. No additional listener is created by security logging.
 
 ## Event contract (schema_version 1)
 
-Every event contains `schema_version`, a UTC `timestamp`, `category=security`, `event`, `level`, a server-generated random `request_id`, configured `service`, `method`, `outcome`, `reason`, and `credential_verified`. A valid source IP is derived only from `RemoteAddr`, never forwarding headers. `key_id`, `source_ip`, `credential_ref`, `payment_ref`, and `l402_reason` are omitted when unavailable.
+Every event contains `schema_version`, a UTC `timestamp`, `category=security`, `event`, `level`, a server-generated random `request_id`, configured `service`, `method`, `outcome`, `reason`, and `credential_verified`. A valid source IP is derived only from `RemoteAddr`, never forwarding headers. `source_ip`, `credential_ref`, `payment_ref`, and `l402_reason` are omitted when unavailable.
 
 `schema_version` is the integer `1`; `credential_verified` is a JSON boolean and is false when credentials are absent. All other fields are strings. `timestamp` uses RFC 3339 with a UTC `Z` suffix and optional fractional seconds. Levels are uppercase `INFO` or `ERROR`. Treat `request_id` as an opaque server-generated string, not a client header or a value with embedded timing semantics. Authorization outcomes are `accepted`, `denied`, or `not_applicable`; settlement outcomes are `settled`, `skipped`, `mismatch`, `error`, or `unknown`; challenge outcomes are `issued` or `error`.
 
@@ -41,11 +39,13 @@ Authentication dispatch order and short-circuiting are unchanged. If L402 is att
 
 ### Correlation and exclusions
 
-The credential reference is HMAC-SHA256 of the 32-byte token ID; attenuated versions of the same token share it. The payment reference is HMAC-SHA256 of the payment hash embedded in the token identifier, never a hash derived from an arbitrary submitted preimage. Inputs use separate `aperture/security/v1/credential\0` and `aperture/security/v1/payment\0` domains. References are lowercase hex prefixed with `hmac:`. Only exact version-0, 66-byte identifiers are correlated; malformed or unavailable identifiers produce no references.
+References use Go’s standard-library [SHA-256 implementation](https://pkg.go.dev/crypto/sha256). The credential reference is SHA-256 of the 32-byte token ID; attenuated versions of the same token share it. The payment reference is SHA-256 of the payment hash embedded in the token identifier, never a hash derived from an arbitrary submitted preimage. Inputs use separate `aperture/security/v1/credential\0` and `aperture/security/v1/payment\0` domains. Each digest covers the domain followed by its 32-byte value; `\0` denotes one NUL byte, not a literal backslash and zero. References are full 256-bit lowercase hex prefixed with `sha256:`. Only exact version-0, 66-byte identifiers are correlated; malformed or unavailable identifiers produce no references. The binary layout is two zero version bytes, 32 payment-hash bytes, then 32 token-ID bytes. No hex encoding is applied before hashing. Fixed digest vectors are in [emitter_test.go](../securitylog/emitter_test.go).
 
-`credential_verified=false` marks all references as unverified claims until signature validation succeeds. A correctly signed but expired/restricted token can have `credential_verified=true` while authentication is denied. Issued tokens are server-generated and marked verified. Reuse remains allowed and creates a new server request ID each time; it is not labeled a replay attack. Initial missing credentials are normal challenge acquisition, not an attack verdict.
+References are deterministic across restarts and independent deployments without key coordination. This is pseudonymization, not anonymity: anyone who knows the token ID or payment hash can compute the corresponding reference, but the reference is not an authentication credential. Analysts do not need the original token. Use collector metadata to scope SIEM queries to the intended environment or tenant; the digest itself contains no deployment boundary.
 
-Events exclude Authorization headers, macaroons, invoices, preimages, payment-hash originals, signing keys, HMAC keys, raw URL/path, query strings and Referer. Service names come from configuration, not request-derived resource names, and are capped at 128 bytes. Standard HTTP methods are retained; other methods become `OTHER`. The fixed schema has no arbitrary user fields or client-controlled correlation IDs.
+`credential_verified` describes each event at emission time; earlier events are never updated. When false, references are unverified claims, not proof that the identified credential was used. A correctly signed but expired/restricted token can have `credential_verified=true` while authentication is denied. Issued tokens are server-generated and marked verified to indicate issuance provenance, not successful client authentication or payment. Reuse remains allowed and creates a new server request ID each time; it is not labeled a replay attack. Initial missing credentials are normal challenge acquisition, not an attack verdict.
+
+Events exclude Authorization headers, macaroons, invoices, preimages, payment-hash originals, signing keys, raw URL/path, query strings and Referer. Service names come from configuration, not request-derived resource names, and are capped at 128 bytes. Standard HTTP methods are retained; other methods become `OTHER`. The fixed schema has no arbitrary user fields or client-controlled correlation IDs.
 
 ## Output bounds and health
 
@@ -75,11 +75,14 @@ Run the affected packages on Linux, including the actual full/closed-pipe tests 
 ```sh
 go test -p 1 ./securitylog ./auth ./mint ./challenger ./proxy .
 go test -p 1 -race ./securitylog ./auth ./mint ./challenger ./proxy .
+go test ./securitylog -run '^$' -bench BenchmarkReferences -benchmem -count=3
 npm run harness:verify
 ```
 
 Use `-p 1` because the existing root hashmail tests and proxy backend tests both bind `localhost:8082`. Parallel package execution can produce unrelated 404/gRPC failures. Race instrumentation and concurrency inside each package remain enabled.
 
-Validated on 2026-09-23 in Linux/arm64 using `golang@sha256:2a0ba12e116687098780d3ce700f9ce3cb340783779646aafbabed748fa6677c` (Go 1.26.0, Bookworm): all six affected packages passed, including `go test -mod=readonly -tags=dev -p 1 -race -count=1 -timeout=5m ./securitylog ./auth ./mint ./challenger ./proxy .`. A production build of `./cmd/aperture` also passed in that container. `go vet` for the same packages and the two harness tests passed locally. Independent `shower` review clarified wire types and mixed stdout parsing; the `sip` consistency check matched configuration and output bounds to the implementation.
+Validated on 2026-09-24 in Linux/arm64 using `golang@sha256:2a0ba12e116687098780d3ce700f9ce3cb340783779646aafbabed748fa6677c` (Go 1.26.0, Bookworm): all six affected packages passed `go test -mod=readonly -tags=dev -p 1 -race -count=1 -timeout=5m ./securitylog ./auth ./mint ./challenger ./proxy .`. A production build of `./cmd/aperture` passed in the same container. Local `go vet` for these packages and the two harness tests passed. Fixed vectors independently calculated with Node.js crypto match Go output; tests cover cross-emitter stability, attenuation, separate domains, malformed identifiers, and removal of key metadata.
 
-The implementation branch is based on `8ffa560`, with the repository-local harness carried separately; it does not include the #286 metrics commits. The original design record is [HANDOFF-L402-SECURITY-EVENTS.md](HANDOFF-L402-SECURITY-EVENTS.md).
+The reference microbenchmark measures both credential and payment digests plus hex/string encoding, not request latency or stdout delivery. Three repeat runs measured SHA-256 at 384–476 ns/op, 544 B/op, 8 allocations versus the previous HMAC implementation at approximately 940–993 ns/op, 1504 B/op, 20 allocations. These are local container measurements, not a production throughput guarantee.
+
+The implementation branch is based on `8ffa560`, with the repository-local harness carried separately; it does not include the #286 metrics commits. The original design record is [HANDOFF-L402-SECURITY-EVENTS.md](HANDOFF-L402-SECURITY-EVENTS.md); its HMAC/key-file requirements are superseded by the keyless correlation contract above.

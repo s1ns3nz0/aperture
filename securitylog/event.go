@@ -3,7 +3,6 @@
 package securitylog
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,7 +10,7 @@ import (
 	"time"
 )
 
-// Event is the version 1 collector contract. References are HMACs, never
+// Event is the version 1 collector contract. References are SHA-256 digests, never
 // credentials. CredentialVerified describes identity validation, not payment.
 type Event struct {
 	SchemaVersion      int       `json:"schema_version"`
@@ -29,7 +28,6 @@ type Event struct {
 	CredentialRef      string    `json:"credential_ref,omitempty"`
 	PaymentRef         string    `json:"payment_ref,omitempty"`
 	CredentialVerified bool      `json:"credential_verified"`
-	KeyID              string    `json:"key_id,omitempty"`
 }
 
 // Detail carries only fixed reason codes and a bounded token identifier.
@@ -70,7 +68,7 @@ func (e *Emitter) Begin(service, method, remoteAddr string) *Trace {
 	}
 	return &Trace{emitter: e, base: Event{
 		SchemaVersion: 1, Category: "security", RequestID: rand.Text(),
-		Service: service, Method: method, SourceIP: ip, KeyID: e.keyID,
+		Service: service, Method: method, SourceIP: ip,
 	}}
 }
 
@@ -107,10 +105,10 @@ func (e *Emitter) references(id []byte) (string, string) {
 		return "", ""
 	}
 	ref := func(domain string, value []byte) string {
-		m := hmac.New(sha256.New, e.key[:])
-		_, _ = m.Write([]byte("aperture/security/v1/" + domain + "\x00"))
-		_, _ = m.Write(value)
-		return "hmac:" + hex.EncodeToString(m.Sum(nil))
+		// The input is bounded to a fixed domain and one 32-byte component.
+		input := append([]byte("aperture/security/v1/"+domain+"\x00"), value...)
+		sum := sha256.Sum256(input)
+		return "sha256:" + hex.EncodeToString(sum[:])
 	}
 	return ref("credential", id[34:66]), ref("payment", id[2:34])
 }

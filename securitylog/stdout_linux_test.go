@@ -36,7 +36,7 @@ func TestPipeBlockedAndClosed(t *testing.T) {
 		}
 		require.Less(t, i, 10000)
 	}
-	e, err := New(bytes.Repeat([]byte{1}, 32), "", sink)
+	e, err := New(sink)
 	require.NoError(t, err)
 	start := time.Now()
 	for i := 0; i < 1000; i++ {
@@ -65,7 +65,7 @@ func TestPipeConcurrentAtomicJSON(t *testing.T) {
 	defer r.Close()
 	sink, err := openPipe(w.Fd())
 	require.NoError(t, err)
-	e, err := New(bytes.Repeat([]byte{1}, 32), "", sink)
+	e, err := New(sink)
 	require.NoError(t, err)
 	lines := make(chan [][]byte, 1)
 	go func() {
