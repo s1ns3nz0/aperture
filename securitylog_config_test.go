@@ -1,6 +1,9 @@
 package aperture
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,17 +19,30 @@ import (
 func TestSecurityLogConfiguration(t *testing.T) {
 	cfg := NewConfig()
 	require.False(t, cfg.SecurityLog.Enabled)
-	require.NoError(t, yaml.Unmarshal([]byte("securitylog:\n  enabled: true\n"), cfg))
+	require.NoError(t, yaml.Unmarshal([]byte("securitylog:\n  enabled: true\n  keyfile: /mounted/key\n  keyid: v2\n"), cfg))
 	require.True(t, cfg.SecurityLog.Enabled)
+	require.Equal(t, "/mounted/key", cfg.SecurityLog.KeyFile)
+	require.Equal(t, "v2", cfg.SecurityLog.KeyID)
 	cfg = NewConfig()
-	_, err := flags.ParseArgs(cfg, []string{"--securitylog.enabled"})
+	_, err := flags.ParseArgs(cfg, []string{"--securitylog.enabled", "--securitylog.keyfile=/mounted/key", "--securitylog.keyid=v3"})
 	require.NoError(t, err)
 	require.True(t, cfg.SecurityLog.Enabled)
-	// Old key flags must not silently imply keyed correlation.
-	for _, flag := range []string{"--securitylog.keyfile=/mounted/key", "--securitylog.keyid=v1"} {
-		_, err := flags.ParseArgs(NewConfig(), []string{flag})
-		require.Error(t, err)
-	}
+	require.Equal(t, "v3", cfg.SecurityLog.KeyID)
+	// Validation occurs before startup can contact a database or node.
+	err = NewAperture(cfg).Start(make(chan error), make(chan struct{}))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "securitylog:")
+	require.NotContains(t, err.Error(), "/mounted/key")
+	p := filepath.Join(t.TempDir(), "key")
+	require.NoError(t, os.WriteFile(p, []byte("key-material-canary"), 0600))
+	cfg.SecurityLog.KeyFile = p
+	err = NewAperture(cfg).Start(make(chan error), make(chan struct{}))
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "key-material-canary")
+	cfg.SecurityLog.Enabled = false
+	key, err := cfg.SecurityLog.LoadKey()
+	require.NoError(t, err)
+	require.Nil(t, key)
 }
 
 type blockedConsoleSink struct{}
@@ -35,7 +51,7 @@ func (blockedConsoleSink) TryWrite([]byte) error { return securitylog.ErrWouldBl
 func (blockedConsoleSink) Close() error          { return nil }
 
 func TestSecurityLogBoundedApplicationConsole(t *testing.T) {
-	e, err := securitylog.New(blockedConsoleSink{})
+	e, err := securitylog.New(bytes.Repeat([]byte{1}, 32), "test", blockedConsoleSink{})
 	require.NoError(t, err)
 	cfg := NewConfig()
 	cfg.Logging.File.Disable = true

@@ -38,6 +38,8 @@ type queued struct {
 // Emitter owns one fixed queue and one interruptible writer. Submitters never
 // wait for output. Close is idempotent and flushes for at most FlushTimeout.
 type Emitter struct {
+	key                            [32]byte
+	keyID                          string
 	sink                           Sink
 	queue                          chan queued
 	stop, done                     chan struct{}
@@ -49,17 +51,18 @@ type Emitter struct {
 	delay                          prometheus.Histogram
 }
 
-func New(sink Sink) (*Emitter, error) {
-	if sink == nil {
+func New(key []byte, keyID string, sink Sink) (*Emitter, error) {
+	if len(key) != 32 || !keyIDPattern.MatchString(keyID) || sink == nil {
 		return nil, errors.New("securitylog: invalid emitter configuration")
 	}
-	e := &Emitter{sink: sink, queue: make(chan queued, QueueSize),
+	e := &Emitter{keyID: keyID, sink: sink, queue: make(chan queued, QueueSize),
 		stop: make(chan struct{}), done: make(chan struct{}),
 		delay: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name: "aperture_securitylog_delay_seconds", Help: "Queue and output delay until delivery or loss.",
 			Buckets: []float64{.001, .01, .1, .25, 1, 5, 30},
 		}),
 	}
+	copy(e.key[:], key)
 	go e.run()
 	return e, nil
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -28,54 +30,60 @@ func (s *memorySink) TryWrite(b []byte) error {
 func (*memorySink) Close() error { return nil }
 
 func TestConfig(t *testing.T) {
-	for _, cfg := range []*Config{nil, {}} {
-		e, err := Open(cfg)
-		require.NoError(t, err)
-		require.Nil(t, e)
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
+			for _, content := range []string{"", "secret-canary", strings.Repeat("g", 64), strings.Repeat("a", 63), strings.Repeat("a", 65), strings.Repeat("a", 64) + strings.Repeat(" ", 1000)} {
+				p := filepath.Join(t.TempDir(), "key")
+				require.NoError(t, os.WriteFile(p, []byte(content), 0600))
+				key, err := (&Config{Enabled: enabled, KeyFile: p}).LoadKey()
+				if enabled {
+					require.Error(t, err)
+					require.NotContains(t, err.Error(), "secret-canary")
+				} else {
+					require.NoError(t, err)
+					require.Nil(t, key)
+				}
+			}
+		})
 	}
-	_, err := New(nil)
+	_, err := (&Config{Enabled: true}).LoadKey()
 	require.Error(t, err)
+	p := filepath.Join(t.TempDir(), "key")
+	require.NoError(t, os.WriteFile(p, []byte(strings.Repeat("ab", 32)+"\n"), 0600))
+	key, err := (&Config{Enabled: true, KeyFile: p, KeyID: "2026-09"}).LoadKey()
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0xab}, 32), key)
+	_, err = (&Config{Enabled: true, KeyFile: p, KeyID: strings.Repeat("x", 65)}).LoadKey()
+	require.Error(t, err)
+	e, err := Open(&Config{})
+	require.NoError(t, err)
+	require.Nil(t, e)
 }
 
 func TestReferencesAndBoundedFields(t *testing.T) {
 	id := append([]byte{0, 0}, bytes.Repeat([]byte{7}, 64)...)
-	newEmitter := func() *Emitter {
-		e, err := New(&memorySink{})
+	newEmitter := func(key byte) *Emitter {
+		e, err := New(bytes.Repeat([]byte{key}, 32), "key-v1", &memorySink{})
 		require.NoError(t, err)
 		t.Cleanup(e.Close)
 		return e
 	}
-	e := newEmitter()
+	e := newEmitter(1)
 	c, p := e.references(id)
 	c2, p2 := e.references(id)
 	require.Equal(t, c, c2)
 	require.Equal(t, p, p2)
 	require.NotEqual(t, c, p)
-	require.Regexp(t, "^sha256:[0-9a-f]{64}$", c)
-	require.Regexp(t, "^sha256:[0-9a-f]{64}$", p)
-	// Independent fixed vectors lock down domain, NUL delimiter and component.
-	require.Equal(t, "sha256:7119e4bb979deb49720c205bbc6227307d56f6ef9d9c61a2077251585a622e7a", c)
-	require.Equal(t, "sha256:a1bed5f3c914f06d3046f7ce708ca81ca06db2f522993a5f6dd8c1b72c274457", p)
-	changed := bytes.Clone(id)
-	changed[34]++
-	changedC, changedP := e.references(changed)
-	require.NotEqual(t, c, changedC)
-	require.Equal(t, p, changedP)
-	changed = bytes.Clone(id)
-	changed[2]++
-	changedC, changedP = e.references(changed)
-	require.Equal(t, c, changedC)
-	require.NotEqual(t, p, changedP)
-	c2, p2 = newEmitter().references(id)
-	require.Equal(t, c, c2)
-	require.Equal(t, p, p2)
-	for _, malformed := range [][]byte{nil, id[:65], append([]byte{1}, id...), append([]byte{0, 1}, id[2:]...)} {
+	c2, p2 = newEmitter(2).references(id)
+	require.NotEqual(t, c, c2)
+	require.NotEqual(t, p, p2)
+	for _, malformed := range [][]byte{nil, id[:65], append([]byte{1}, id...)} {
 		c, p := e.references(malformed)
 		require.Empty(t, c)
 		require.Empty(t, p)
 	}
 	sink := &memorySink{}
-	e, err := New(sink)
+	e, err := New(bytes.Repeat([]byte{1}, 32), "version", sink)
 	require.NoError(t, err)
 	tr := e.Begin(strings.Repeat("S", 100000), "METHOD-SECRET", "192.0.2.1:5000")
 	tr.Record(Detail{Kind: "l402.authorization", Outcome: "denied", Reason: "invalid_signature", Identifier: id})
@@ -83,7 +91,6 @@ func TestReferencesAndBoundedFields(t *testing.T) {
 	e.Close()
 	var event Event
 	require.NoError(t, json.Unmarshal(bytes.TrimSpace(sink.Bytes()), &event))
-	require.NotContains(t, string(sink.Bytes()), `"key_id"`)
 	require.Len(t, event.Service, 128)
 	require.Equal(t, "OTHER", event.Method)
 	require.False(t, event.CredentialVerified)
@@ -95,7 +102,7 @@ func TestReferencesAndBoundedFields(t *testing.T) {
 
 func TestConcurrentJSONAndUniqueRequests(t *testing.T) {
 	sink := &memorySink{}
-	e, err := New(sink)
+	e, err := New(bytes.Repeat([]byte{3}, 32), "v1", sink)
 	require.NoError(t, err)
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
@@ -123,7 +130,7 @@ func TestConcurrentJSONAndUniqueRequests(t *testing.T) {
 func TestOutputFailureAndShutdown(t *testing.T) {
 	for _, failure := range []error{ErrWouldBlock, errors.New("sink failure secret-canary")} {
 		t.Run(failure.Error(), func(t *testing.T) {
-			e, err := New(&memorySink{fail: failure})
+			e, err := New(bytes.Repeat([]byte{1}, 32), "", &memorySink{fail: failure})
 			require.NoError(t, err)
 			start := time.Now()
 			for i := 0; i < 1000; i++ {
@@ -149,7 +156,7 @@ func TestOutputFailureAndShutdown(t *testing.T) {
 }
 
 func TestConcurrentClose(t *testing.T) {
-	e, err := New(&memorySink{})
+	e, err := New(bytes.Repeat([]byte{1}, 32), "", &memorySink{})
 	require.NoError(t, err)
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {

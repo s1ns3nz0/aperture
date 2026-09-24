@@ -338,6 +338,9 @@ type Config struct {
 }
 
 func (c *Config) validate() error {
+	if _, err := c.SecurityLog.LoadKey(); err != nil {
+		return err
+	}
 	if !c.Authenticator.Disable {
 		if err := c.Authenticator.validate(); err != nil {
 			return err

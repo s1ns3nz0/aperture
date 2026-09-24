@@ -379,7 +379,9 @@ logging:
     level: "info"
 # Structured security events are independent of debuglevel; OFF by default.
 # Requires Linux container stdout as a pipe (no TTY or file redirection).
-# No key file is needed: references use domain-separated SHA-256 digests.
-# See docs/security-events.md for schema, loss accounting, and correlation.
+# Provide a dedicated mounted secret with 64 hex characters (32 random bytes).
+# See docs/security-events.md for schema, loss accounting, and key rotation.
 securitylog:
   enabled: false
+  keyfile: ""
+  keyid: ""
