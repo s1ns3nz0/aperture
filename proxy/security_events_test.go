@@ -154,7 +154,7 @@ func eventHeader(t *testing.T, m *macaroon.Macaroon, p lntypes.Preimage) http.He
 func authorizations(events []securitylog.Event) []securitylog.Event {
 	var out []securitylog.Event
 	for _, e := range events {
-		if e.Event == "l402.authorization" {
+		if e.Category == "security" && e.Event == "l402.authorization" {
 			out = append(out, e)
 		}
 	}
@@ -275,9 +275,34 @@ func TestSecurityEventsFailures(t *testing.T) {
 			final := authorizations(f.sink.events(t))
 			require.Len(t, final, 1)
 			e := final[0]
-			require.Equal(t, "denied", e.Outcome)
+			wantOutcome := "denied"
+			if tc.level == "ERROR" {
+				wantOutcome = "indeterminate"
+			}
+			require.Equal(t, wantOutcome, e.Outcome)
 			require.Equal(t, tc.reason, e.Reason)
-			require.Equal(t, tc.level, e.Level)
+			require.Equal(t, "INFO", e.Level)
+			var failures []securitylog.Event
+			for _, record := range f.sink.events(t) {
+				if record.Category == "security" {
+					require.Equal(t, "INFO", record.Level)
+				} else {
+					require.Equal(t, "operational", record.Category)
+					require.Equal(t, "ERROR", record.Level)
+					require.Equal(t, e.RequestID, record.RequestID)
+					require.Equal(t, tc.reason, record.Reason)
+					failures = append(failures, record)
+				}
+			}
+			if tc.level == "ERROR" {
+				wantFailures := 1
+				if tc.name == "invoice lookup" {
+					wantFailures = 2 // Settlement and authorization phases.
+				}
+				require.Len(t, failures, wantFailures)
+			} else {
+				require.Empty(t, failures)
+			}
 			if tc.name == "signature" || tc.name == "preimage" {
 				require.False(t, e.CredentialVerified)
 				require.NotEmpty(t, e.PaymentRef)
@@ -424,6 +449,12 @@ func TestSecurityEventsAttenuationAndChallengeFailure(t *testing.T) {
 	last := events[len(events)-1]
 	require.Equal(t, "l402.challenge", last.Event)
 	require.Equal(t, "ERROR", last.Level)
+	require.Equal(t, "operational", last.Category)
+	security := events[len(events)-2]
+	require.Equal(t, "security", security.Category)
+	require.Equal(t, "INFO", security.Level)
+	require.Equal(t, "error", security.Outcome)
+	require.Equal(t, security.RequestID, last.RequestID)
 	require.Equal(t, "challenge_creation_failed", last.Reason)
 	require.NotContains(t, f.sink.data.String(), "mint-error-secret-canary")
 }
@@ -480,5 +511,15 @@ func TestSecurityEventsMixedInternalFailure(t *testing.T) {
 	require.Equal(t, "not_applicable", final[0].Outcome)
 	require.Equal(t, "accepted_other_scheme", final[0].Reason)
 	require.Equal(t, "secret_store_error", final[0].L402Reason)
-	require.Equal(t, "ERROR", final[0].Level)
+	require.Equal(t, "INFO", final[0].Level)
+	var failures []securitylog.Event
+	for _, e := range f.sink.events(t) {
+		if e.Category == "operational" {
+			failures = append(failures, e)
+		}
+	}
+	require.Len(t, failures, 1)
+	require.Equal(t, "secret_store_error", failures[0].Reason)
+	require.Equal(t, "ERROR", failures[0].Level)
+	require.Equal(t, final[0].RequestID, failures[0].RequestID)
 }

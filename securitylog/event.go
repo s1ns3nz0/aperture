@@ -1,4 +1,4 @@
-// Package securitylog emits the opt-in, bounded L402 security event stream.
+// Package securitylog emits bounded L402 security and operational event streams.
 // It is independent of application logging and never accepts raw error text.
 package securitylog
 
@@ -33,6 +33,7 @@ type Event struct {
 }
 
 // Detail carries only fixed reason codes and a bounded token identifier.
+// Internal also emits an operational failure; security events remain INFO.
 // Identifier is never serialized; Record turns its components into references.
 type Detail struct {
 	Kind, Outcome, Reason, L402Reason string
@@ -90,14 +91,28 @@ func (t *Trace) Record(d Detail) {
 		e.Timestamp = d.ObservedAt.UTC()
 	}
 	e.Level = "INFO"
-	if d.Internal {
-		e.Level = "ERROR"
-	}
 	e.Event, e.Outcome, e.Reason = d.Kind, d.Outcome, d.Reason
+	// Distinguish an unavailable decision from a known-invalid credential.
+	// An accepted alternate scheme must retain its final not_applicable result.
+	if d.Internal && d.Kind == "l402.authorization" && d.Outcome == "denied" {
+		e.Outcome = "indeterminate"
+	}
 	e.L402Reason = d.L402Reason
 	e.CredentialRef, e.PaymentRef = t.emitter.references(d.Identifier)
 	e.CredentialVerified = d.Verified && e.CredentialRef != ""
 	t.emitter.emit(e)
+	if d.Internal {
+		// Operational records need request context, not credential references.
+		op := t.base
+		op.Timestamp = e.Timestamp
+		op.Category, op.Level = "operational", "ERROR"
+		op.Event, op.Outcome, op.Reason = d.Kind, "error", d.Reason
+		if d.L402Reason != "" {
+			op.Reason = d.L402Reason
+		}
+		op.KeyID = ""
+		t.emitter.emit(op)
+	}
 }
 
 func (e *Emitter) references(id []byte) (string, string) {
@@ -121,7 +136,7 @@ func validKind(v string) bool {
 
 func validOutcome(v string) bool {
 	switch v {
-	case "accepted", "denied", "not_applicable", "issued", "error", "settled", "skipped", "unknown", "mismatch":
+	case "accepted", "denied", "indeterminate", "not_applicable", "issued", "error", "settled", "skipped", "unknown", "mismatch":
 		return true
 	}
 	return false
